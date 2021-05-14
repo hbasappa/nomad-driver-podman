@@ -7,21 +7,35 @@ import (
 	"fmt"
 	"io/ioutil"
 	"net/http"
+	"time"
+
+	nstructs "github.com/hashicorp/nomad/nomad/structs"
 )
 
 // ContainerCreate creates a new container
 func (c *API) ContainerCreate(ctx context.Context, create SpecGenerator) (ContainerCreateResponse, error) {
 
+	attempted := 0
+	create.CgroupParent = "ifc-scheduler_allocations.slice"
 	response := ContainerCreateResponse{}
 
 	jsonString, err := json.Marshal(create)
 	if err != nil {
 		return response, err
 	}
-
-	res, err := c.Post(ctx, "/v1.0.0/libpod/containers/create", bytes.NewBuffer(jsonString))
+START:
+	res, err := c.Post(ctx, "/v3.0.0/libpod/containers/create", bytes.NewBuffer(jsonString))
 	if err != nil {
-		return response, err
+		c.logger.Error("failed to start container", "error", err)
+		//if isPodmanTransientError(err) {
+		if attempted < 2 {
+			attempted++
+			time.Sleep(nextBackoff(attempted))
+			goto START
+		}
+		c.logger.Error("failed to start container after 5 attempts", "error", err)
+		//}
+		return response, nstructs.NewRecoverableError(err, true)
 	}
 
 	defer res.Body.Close()

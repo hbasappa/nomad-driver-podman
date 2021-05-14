@@ -24,9 +24,21 @@ type ClientConfig struct {
 	HttpTimeout time.Duration
 }
 
+var (
+	podmanTransientErrs = []string{
+		"Client.Timeout exceeded while awaiting headers",
+		"EOF",
+		"API error (500)",
+		"no such image",
+		"unknown error",
+	}
+	BackOffDelay    = time.Duration(200)
+	BackoffAttempts = 2
+)
+
 func DefaultClientConfig() ClientConfig {
 	cfg := ClientConfig{
-		HttpTimeout: 60 * time.Second,
+		HttpTimeout: 90 * time.Second,
 	}
 	uid := os.Getuid()
 	// are we root?
@@ -54,7 +66,7 @@ func NewClient(logger hclog.Logger, config ClientConfig) *API {
 		path := strings.TrimPrefix(baseUrl, "unix:")
 		ac.httpClient.Transport = &http.Transport{
 			DialContext: func(_ context.Context, _, _ string) (net.Conn, error) {
-				return net.Dial("unix", path)
+				return net.DialTimeout("unix", path, 10*time.Second)
 			},
 		}
 	} else {
@@ -92,4 +104,25 @@ func (c *API) Delete(ctx context.Context, path string) (*http.Response, error) {
 		return nil, err
 	}
 	return c.Do(req)
+}
+
+func isPodmanTransientError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	errMsg := err.Error()
+	for _, te := range podmanTransientErrs {
+		if strings.Contains(errMsg, te) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func nextBackoff(attempted int) time.Duration {
+	// attempts in 200ms, 800ms, 3.2s, 12.8s, 51.2s
+	// TODO: add randomization factor and 0extract to a helper
+	return 1 << (2 * uint64(attempted)) * 50 * time.Millisecond
 }

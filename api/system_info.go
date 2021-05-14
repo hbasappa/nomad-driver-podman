@@ -6,15 +6,22 @@ import (
 	"fmt"
 	"io/ioutil"
 	"net/http"
+	"time"
 )
 
 // SystemInfo returns information on the system and libpod configuration
 func (c *API) SystemInfo(ctx context.Context) (Info, error) {
 
 	var infoData Info
-
-	res, err := c.Get(ctx, "/v1.0.0/libpod/info")
+	attempted := 0
+START:
+	res, err := c.Get(ctx, "/v3.0.0/libpod/info")
 	if err != nil {
+		if attempted < BackoffAttempts {
+			attempted++
+			time.Sleep(BackOffDelay * time.Millisecond)
+			goto START
+		}
 		return infoData, err
 	}
 
