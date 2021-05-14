@@ -10,4 +10,4 @@ mkdir -p build/test
 # ensure to build in a isolated GOPATH in order to get predictable dependencies
 export GOPATH=$project/build 
 
-go build
+http_proxy=${PROXY} https_proxy=${PROXY} no_proxy=.cisco.com,.insieme.local go build

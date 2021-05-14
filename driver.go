@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/hashicorp/nomad/nomad/structs"
+	nstructs "github.com/hashicorp/nomad/nomad/structs"
 
 	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/nomad-driver-podman/api"
@@ -18,7 +18,7 @@ import (
 	"github.com/hashicorp/nomad/client/stats"
 	"github.com/hashicorp/nomad/client/taskenv"
 	"github.com/hashicorp/nomad/drivers/shared/eventer"
-	nstructs "github.com/hashicorp/nomad/nomad/structs"
+	"github.com/hashicorp/nomad/helper"
 	"github.com/hashicorp/nomad/plugins/base"
 	"github.com/hashicorp/nomad/plugins/drivers"
 	"github.com/hashicorp/nomad/plugins/shared/hclspec"
@@ -353,6 +353,8 @@ func (d *Driver) StartTask(cfg *drivers.TaskConfig) (*drivers.TaskHandle, *drive
 
 	// ensure to include port_map into tasks environment map
 	cfg.Env = taskenv.SetPortMapEnvs(cfg.Env, driverConfig.PortMap)
+	// ensure to include port_map into tasks environment map
+	cfg.Env = d.CleanServiceEnvs(cfg.Env)
 
 	// Basic config options
 	createOpts.ContainerBasicConfig.Name = containerName
@@ -461,9 +463,16 @@ func (d *Driver) StartTask(cfg *drivers.TaskConfig) (*drivers.TaskHandle, *drive
 		} else {
 			// let's remove the old, dead container
 			d.logger.Info("Detect stopped container with same name, removing it", "task", cfg.ID, "container", otherContainerInspect.ID)
-			if err = d.podman.ContainerDelete(d.ctx, otherContainerInspect.ID, true, true); err != nil {
-				return nil, nil, nstructs.WrapRecoverable(fmt.Sprintf("failed to remove dead container: %v", err), err)
+			if err = d.podman.ContainerDelete(d.ctx, containerName, true, true); err != nil {
+				errNew := nstructs.NewRecoverableError(err, true)
+				return nil, nil, errNew
 			}
+		}
+	} else {
+		// let's remove the old, dead container
+		d.logger.Info("deleting any container with same name, removing it", "task", cfg.ID, "container", otherContainerInspect.ID, "name", containerName)
+		if err = d.podman.ContainerDelete(d.ctx, containerName, true, true); err != nil {
+			d.logger.Error("failed to remove dead container", "error", err)
 		}
 	}
 
@@ -474,12 +483,16 @@ func (d *Driver) StartTask(cfg *drivers.TaskConfig) (*drivers.TaskHandle, *drive
 		// do we already have this image in local storage?
 		haveImage, err := d.podman.ImageExists(d.ctx, createOpts.Image)
 		if err != nil {
-			return nil, nil, fmt.Errorf("failed to start task, unable to check for local image: %v", err)
+			errNew := nstructs.NewRecoverableError(err, true)
+			return nil, nil, errNew
+			//return nil, nil, nstructs.WrapRecoverable(fmt.Sprintf("failed to start task, unable to check for local image: %v", err), err)
 		}
 		if !haveImage {
 			// image is not in local storage, so we need to pull it
 			if err = d.podman.ImagePull(d.ctx, createOpts.Image); err != nil {
-				return nil, nil, fmt.Errorf("failed to start task, unable to pull image %s: %v", createOpts.Image, err)
+				errNew := nstructs.NewRecoverableError(err, true)
+				return nil, nil, errNew
+				//return nil, nil, nstructs.WrapRecoverable(fmt.Sprintf("failed to start task, unable to pull image %s: %v", createOpts.Image, err), err)
 			}
 		}
 
@@ -488,7 +501,9 @@ func (d *Driver) StartTask(cfg *drivers.TaskConfig) (*drivers.TaskHandle, *drive
 			d.logger.Warn("Create Warning", "warning", w)
 		}
 		if err != nil {
-			return nil, nil, fmt.Errorf("failed to start task, could not create container: %v", err)
+			errNew := nstructs.NewRecoverableError(err, true)
+			return nil, nil, errNew
+			//return nil, nil, nstructs.WrapRecoverable(fmt.Sprintf("failed to start task, could not create container: %v", err), err)
 		}
 		containerID = createResponse.Id
 	}
@@ -503,7 +518,9 @@ func (d *Driver) StartTask(cfg *drivers.TaskConfig) (*drivers.TaskHandle, *drive
 	if !recoverRunningContainer {
 		if err = d.podman.ContainerStart(d.ctx, containerID); err != nil {
 			cleanup()
-			return nil, nil, fmt.Errorf("failed to start task, could not start container: %v", err)
+			errNew := nstructs.NewRecoverableError(err, true)
+			return nil, nil, errNew
+			//return nil, nil, nstructs.WrapRecoverable(fmt.Sprintf("failed to start task, could not start container: %v", err), err)
 		}
 	}
 
@@ -511,7 +528,9 @@ func (d *Driver) StartTask(cfg *drivers.TaskConfig) (*drivers.TaskHandle, *drive
 	if err != nil {
 		d.logger.Error("failed to inspect container", "err", err)
 		cleanup()
-		return nil, nil, fmt.Errorf("failed to start task, could not inspect container : %v", err)
+        errNew := nstructs.NewRecoverableError(fmt.Errorf("failed to start task, could not inspect container : %v", err), true)
+        return nil, nil, errNew
+		//return nil, nil, fmt.Errorf("failed to start task, could not inspect container : %v", err)
 	}
 
 	net := &drivers.DriverNetwork{
@@ -546,7 +565,9 @@ func (d *Driver) StartTask(cfg *drivers.TaskConfig) (*drivers.TaskHandle, *drive
 	if err := handle.SetDriverState(&driverState); err != nil {
 		d.logger.Error("failed to start task, error setting driver state", "error", err)
 		cleanup()
-		return nil, nil, fmt.Errorf("failed to set driver state: %v", err)
+        errNew := nstructs.NewRecoverableError(fmt.Errorf("failed to set driver state: %v", err), true)
+        return nil, nil, errNew
+		//return nil, nil, fmt.Errorf("failed to set driver state: %v", err)
 	}
 
 	d.tasks.Set(cfg.ID, h)
@@ -611,7 +632,8 @@ func (d *Driver) StopTask(taskID string, timeout time.Duration, signal string) e
 	err := d.podman.ContainerStop(d.ctx, handle.containerID, int(timeout.Seconds()))
 	if err != nil {
 		d.logger.Error("Could not stop/kill container", "containerID", handle.containerID, "err", err)
-		return err
+	    errNew := nstructs.NewRecoverableError(err, true)
+		return errNew
 	}
 	return nil
 }
@@ -702,6 +724,18 @@ func (d *Driver) SignalTask(taskID string, signal string) error {
 // ExecTask function is used by the Nomad client to execute commands inside the task execution context.
 func (d *Driver) ExecTask(taskID string, cmd []string, timeout time.Duration) (*drivers.ExecTaskResult, error) {
 	return nil, fmt.Errorf("Podman driver does not support exec")
+}
+
+func (d *Driver) CleanServiceEnvs(envMap map[string]string) map[string]string {
+	cleanedEnv := make(map[string]string, len(envMap))
+	for k, v := range envMap {
+		cleanedK := k
+		//if strings.HasPrefix(k, "-") {
+		cleanedK = helper.CleanEnvVar(k, '_')
+		//}
+		cleanedEnv[cleanedK] = v
+	}
+	return cleanedEnv
 }
 
 func (d *Driver) containerMounts(task *drivers.TaskConfig, driverConfig *TaskConfig) ([]spec.Mount, error) {
@@ -806,7 +840,7 @@ func (d *Driver) portMappings(taskCfg *drivers.TaskConfig, driverCfg TaskConfig)
 	} else if len(driverCfg.PortMap) > 0 {
 		// DEPRECATED: This style of PortMapping was Deprecated in Nomad 0.12
 		network := taskCfg.Resources.NomadResources.Networks[0]
-		allPorts := []structs.Port{}
+		allPorts := []nstructs.Port{}
 		allPorts = append(allPorts, network.ReservedPorts...)
 		allPorts = append(allPorts, network.DynamicPorts...)
 
